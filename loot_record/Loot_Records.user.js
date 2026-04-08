@@ -61,7 +61,7 @@
     },
     inventory: {
       ready: false,
-      byItemHridLevel: new Map(),
+      byId: new Map(),
     },
     i18nCache: new Map(),
     recordsCache: [],
@@ -158,7 +158,9 @@
       const count = Math.max(0, Number(it?.count) || 0);
       if (typeof hrid !== "string" || !hrid) continue;
       const key = `${hrid}#${lv}`;
-      map.set(key, { itemHrid: hrid, enhancementLevel: lv, count });
+      const existing = map.get(key) || { itemHrid: hrid, enhancementLevel: lv, count: 0 };
+      existing.count += count;
+      map.set(key, existing);
     }
     return map;
   }
@@ -184,15 +186,18 @@
 
   function snapshotFromCharacterItems(characterItems) {
     const list = Array.isArray(characterItems) ? characterItems : [];
-    const items = [];
+    const map = new Map();
     for (const it of list) {
       const hrid = it?.itemHrid;
       const lv = Number(it?.enhancementLevel ?? 0) || 0;
       const count = Math.max(0, Number(it?.count) || 0);
       if (typeof hrid !== "string" || !hrid) continue;
-      items.push({ itemHrid: hrid, enhancementLevel: lv, count });
+      const key = `${hrid}#${lv}`;
+      const existing = map.get(key) || { itemHrid: hrid, enhancementLevel: lv, count: 0 };
+      existing.count += count;
+      map.set(key, existing);
     }
-    return items;
+    return Array.from(map.values());
   }
 
   function getSnapshotForPlayer(playerName) {
@@ -218,18 +223,7 @@
 
   function getRuntimeInventoryAsCharacterItems() {
     if (!runtime.inventory.ready) return [];
-    const out = [];
-    for (const [hrid, levelMap] of runtime.inventory.byItemHridLevel.entries()) {
-      if (typeof hrid !== "string" || !hrid) continue;
-      if (!(levelMap instanceof Map)) continue;
-      for (const [lv, count] of levelMap.entries()) {
-        const level = Number(lv) || 0;
-        const c = Math.max(0, Number(count) || 0);
-        if (c <= 0) continue;
-        out.push({ itemHrid: hrid, enhancementLevel: level, count: c });
-      }
-    }
-    return out;
+    return Array.from(runtime.inventory.byId.values());
   }
 
   function hardResetForPlayerSwitch() {
@@ -237,7 +231,7 @@
     runtime.lastSaved = { key: "", ts: 0 };
     runtime.openRecordIds.clear();
     runtime.inventory.ready = false;
-    runtime.inventory.byItemHridLevel = new Map();
+    runtime.inventory.byId = new Map();
     runtime.recordsCache = [];
     runtime.recordsLoaded = false;
     runtime.recordsLoadedDbName = "";
@@ -1032,13 +1026,14 @@
     return "其他";
   }
 
-  function getInvLevelMap(itemHrid) {
-    let levelMap = runtime.inventory.byItemHridLevel.get(itemHrid);
-    if (!levelMap) {
-      levelMap = new Map();
-      runtime.inventory.byItemHridLevel.set(itemHrid, levelMap);
-    }
-    return levelMap;
+
+
+  function getUniqueKeyForCharacterItem(it) {
+    if (it.id != null) return String(it.id);
+    const loc = it.itemLocationHrid || "unknown";
+    const hrid = it.itemHrid || "";
+    const lv = Number(it.enhancementLevel ?? 0) || 0;
+    return `${hrid}#${lv}#${loc}`;
   }
 
   function updateInventoryFromCharacterItems(characterItems) {
@@ -1046,13 +1041,11 @@
     const list = Array.isArray(characterItems) ? characterItems : [];
     for (const it of list) {
       const hrid = it?.itemHrid;
-      const level = Number(it?.enhancementLevel ?? 0) || 0;
-      const count = Number(it?.count) || 0;
       if (typeof hrid !== "string") continue;
-      if (!next.has(hrid)) next.set(hrid, new Map());
-      next.get(hrid).set(level, Math.max(0, count));
+      const key = getUniqueKeyForCharacterItem(it);
+      next.set(key, { ...it });
     }
-    runtime.inventory.byItemHridLevel = next;
+    runtime.inventory.byId = next;
     runtime.inventory.ready = true;
   }
 
@@ -1065,13 +1058,15 @@
     const deltaByKey = new Map();
     for (const it of list) {
       const hrid = it?.itemHrid;
+      if (typeof hrid !== "string") continue;
       const level = Number(it?.enhancementLevel ?? 0) || 0;
       const nextCount = Number(it?.count) || 0;
-      if (typeof hrid !== "string") continue;
-
-      const levelMap = getInvLevelMap(hrid);
-      const oldCount = levelMap.get(level) || 0;
       const safeNext = Math.max(0, nextCount);
+
+      const itemKey = getUniqueKeyForCharacterItem(it);
+      const oldIt = runtime.inventory.byId.get(itemKey);
+      const oldCount = oldIt ? (Number(oldIt.count) || 0) : 0;
+      
       const delta = safeNext - oldCount;
       if (delta !== 0) {
         const key = `${hrid}#${level}`;
@@ -1081,7 +1076,12 @@
           delta: (deltaByKey.get(key)?.delta || 0) + delta,
         });
       }
-      levelMap.set(level, safeNext);
+      
+      if (safeNext > 0) {
+        runtime.inventory.byId.set(itemKey, { ...it, count: safeNext });
+      } else {
+        runtime.inventory.byId.delete(itemKey);
+      }
     }
 
     const gains = [];
@@ -1404,35 +1404,25 @@
     if (!gains.length && !consumes.length) return;
 
     const actionHridFromPayload = extractActionHridDeep(payload) || "";
-    const shouldIgnoreMarketplace =
-      looksLikeMarketplacePayload(payload) || (isMarketplacePage() && !actionHridFromPayload && deltaLooksLikeTrade(gains, consumes));
-    if (shouldIgnoreMarketplace) {
-      try {
-        const playerName = runtime.selfName || nameFromPayload || "";
-        if (playerName && payload?.endCharacterItems) saveSnapshotForPlayer(playerName, payload.endCharacterItems, nowTs());
-      } catch {}
-      return;
-    }
+    
+    const isMarketplace = looksLikeMarketplacePayload(payload) || (isMarketplacePage() && !actionHridFromPayload && deltaLooksLikeTrade(gains, consumes));
 
     const tsNow = nowTs();
     const isFresh = tsNow - (Number(runtime.lastAction.ts) || 0) < 120000;
     const fallbackActionHrid = actionHridFromPayload;
-    const actionHrid = isFresh ? runtime.lastAction.actionHrid || fallbackActionHrid : fallbackActionHrid;
-    let actionCategory = isFresh
+    const actionHrid = isFresh && !isMarketplace ? runtime.lastAction.actionHrid || fallbackActionHrid : fallbackActionHrid;
+    
+    let actionCategory = isMarketplace ? "市场交易" : (isFresh
       ? runtime.lastAction.actionCategory || classifyActionCategory(actionHrid) || "未分类"
-      : classifyActionCategory(actionHrid);
+      : classifyActionCategory(actionHrid));
 
     if ((actionCategory === "未分类" || actionCategory === "其他") && !actionHrid) {
       const hasTeaConsume = (Array.isArray(consumes) ? consumes : []).some((it) => isTeaItemHrid(it?.itemHrid));
+      const hasMazeSupplyConsume = (Array.isArray(consumes) ? consumes : []).some((it) => isMazeSupplyItemHrid(it?.itemHrid));
+      const hasFoodConsume = (Array.isArray(consumes) ? consumes : []).some((it) => isFoodItemHrid(it?.itemHrid));
       if (hasTeaConsume) actionCategory = "茶消耗";
-      else {
-        const hasMazeSupplyConsume = (Array.isArray(consumes) ? consumes : []).some((it) => isMazeSupplyItemHrid(it?.itemHrid));
-        if (hasMazeSupplyConsume) actionCategory = "迷宫用品";
-        else {
-        const hasFoodConsume = (Array.isArray(consumes) ? consumes : []).some((it) => isFoodItemHrid(it?.itemHrid));
-        if (hasFoodConsume) actionCategory = "食物消耗";
-        }
-      }
+      else if (hasMazeSupplyConsume) actionCategory = "迷宫用品";
+      else if (hasFoodConsume) actionCategory = "食物消耗";
     }
 
     const key = buildGainsDedupeKey({ gains, consumes, actionCategory, actionHrid });
