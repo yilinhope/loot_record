@@ -83,6 +83,8 @@
         taxEnabled: true,
         taxRate: 0.02,
         customCategories: [],
+        hiddenInNetCategories: [],
+        fabPos: { x: null, y: null },
       },
       filters: {
         from: "",
@@ -482,6 +484,18 @@
           .map((x) => clampString(x, 32))
           .filter(Boolean);
       }
+      if (Array.isArray(data.settings.hiddenInNetCategories)) {
+        runtime.ui.settings.hiddenInNetCategories = data.settings.hiddenInNetCategories
+          .map((x) => (typeof x === "string" ? x.trim() : ""))
+          .filter(Boolean);
+      }
+      if (data.settings.fabPos && typeof data.settings.fabPos === "object") {
+        const x = Number(data.settings.fabPos.x);
+        const y = Number(data.settings.fabPos.y);
+        if (Number.isFinite(x) && Number.isFinite(y)) {
+          runtime.ui.settings.fabPos = { x, y };
+        }
+      }
     }
     if (data.filters && typeof data.filters === "object") {
       runtime.ui.filters.from = clampString(data.filters.from, 32);
@@ -531,8 +545,25 @@
     const next = cur.filter((x) => x !== c);
     if (next.length === cur.length) return false;
     runtime.ui.settings.customCategories = next;
+    
+    // Also remove from hiddenInNetCategories if exists
+    const hiddenCur = runtime.ui.settings.hiddenInNetCategories || [];
+    runtime.ui.settings.hiddenInNetCategories = hiddenCur.filter(x => x !== c);
+
     saveUiState();
     return true;
+  }
+
+  function toggleCategoryNetProfit(name) {
+    const c = normalizeCategoryName(name);
+    if (!c) return;
+    const cur = runtime.ui.settings.hiddenInNetCategories || [];
+    if (cur.includes(c)) {
+      runtime.ui.settings.hiddenInNetCategories = cur.filter(x => x !== c);
+    } else {
+      runtime.ui.settings.hiddenInNetCategories = cur.concat(c);
+    }
+    saveUiState();
   }
 
   function ensureDbSchema(req) {
@@ -604,8 +635,19 @@
     return withStore("readwrite", (store) => store.clear());
   }
 
+  function deleteRecordFromDb(id) {
+    const key = typeof id === "string" ? id : "";
+    if (!key) return Promise.resolve(false);
+    return withStore("readwrite", (store) => {
+      return new Promise((resolve, reject) => {
+        const req = store.delete(key);
+        req.onsuccess = () => resolve(true);
+        req.onerror = () => reject(req.error);
+      });
+    });
+  }
+
   function deleteRecordsOlderThanTs(tsExclusive) {
-    const t = Number(tsExclusive) || 0;
     if (!t) return Promise.resolve(0);
     return withStore("readwrite", (store) => {
       const index = store.index("ts");
@@ -1624,11 +1666,13 @@
         background: linear-gradient(135deg, var(--mwl-accent), var(--mwl-accent2));
         color: #071018;
         box-shadow: var(--mwl-shadow);
-        cursor: pointer;
+        cursor: grab;
         user-select: none;
         font-family: var(--mwl-font);
         letter-spacing: 0.2px;
+        touch-action: none;
       }
+      #${APP.id}-fab:active { cursor: grabbing; }
       #${APP.id}-fab:hover { filter: brightness(1.06); }
       #${APP.id}-fab:active { transform: translateY(1px); }
       #${APP.id}-fab .mwl-fab-title { font-weight: 700; font-size: 13px; }
@@ -1802,10 +1846,13 @@
         border-bottom: 1px solid var(--mwl-border);
         cursor: pointer;
       }
-      .mwl-record-hd .mwl-left { display: grid; gap: 2px; }
-      .mwl-record-hd .mwl-t { font-weight: 800; font-size: 12px; }
+      .mwl-record-hd .mwl-left { display: grid; gap: 2px; flex: 1; min-width: 0; }
+      .mwl-record-hd .mwl-t { font-weight: 800; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       .mwl-record-hd .mwl-s { font-size: 12px; color: var(--mwl-muted); font-family: var(--mwl-mono); }
+      .mwl-record-hd .mwl-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
       .mwl-record-hd .mwl-v { font-weight: 800; font-size: 12px; color: var(--mwl-warn); font-family: var(--mwl-mono); }
+      .mwl-record-hd .mwl-del-btn { padding: 2px 6px; font-size: 10px; border-radius: 4px; background: rgba(255,77,79,0.12); border: 1px solid rgba(255,77,79,0.3); color: var(--mwl-text); cursor: pointer; }
+      .mwl-record-hd .mwl-del-btn:hover { background: rgba(255,77,79,0.25); }
       .mwl-record-bd { padding: 12px; display: none; }
       .mwl-record.open .mwl-record-bd { display: block; }
       .mwl-cat { text-decoration: underline; cursor: pointer; }
@@ -1867,7 +1914,92 @@
       <div class="mwl-fab-title">掉落记录</div>
       <div class="mwl-fab-badge" id="${APP.id}-fab-badge">0</div>
     `;
-    fab.addEventListener("click", () => toggleUi(true));
+
+    // Apply saved position
+    const savedPos = runtime.ui?.settings?.fabPos;
+    if (savedPos && typeof savedPos.x === "number" && typeof savedPos.y === "number") {
+      fab.style.right = "auto";
+      fab.style.bottom = "auto";
+      fab.style.left = `${savedPos.x}px`;
+      fab.style.top = `${savedPos.y}px`;
+    }
+
+    let isDragging = false;
+    let hasMoved = false;
+    let dragStartX = 0;
+    let dragStartY = 0;
+    let initialLeft = 0;
+    let initialTop = 0;
+
+    const onDragStart = (e) => {
+      isDragging = true;
+      hasMoved = false;
+      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+      const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+      dragStartX = clientX;
+      dragStartY = clientY;
+      
+      const rect = fab.getBoundingClientRect();
+      initialLeft = rect.left;
+      initialTop = rect.top;
+
+      fab.style.right = "auto";
+      fab.style.bottom = "auto";
+      fab.style.left = `${initialLeft}px`;
+      fab.style.top = `${initialTop}px`;
+      fab.style.transition = "none";
+    };
+
+    const onDragMove = (e) => {
+      if (!isDragging) return;
+      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+      const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+      const dx = clientX - dragStartX;
+      const dy = clientY - dragStartY;
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) hasMoved = true;
+      
+      if (hasMoved) {
+        e.preventDefault();
+        let newX = initialLeft + dx;
+        let newY = initialTop + dy;
+        const rect = fab.getBoundingClientRect();
+        
+        newX = Math.max(0, Math.min(newX, window.innerWidth - rect.width));
+        newY = Math.max(0, Math.min(newY, window.innerHeight - rect.height));
+        
+        fab.style.left = `${newX}px`;
+        fab.style.top = `${newY}px`;
+      }
+    };
+
+    const onDragEnd = () => {
+      if (!isDragging) return;
+      isDragging = false;
+      fab.style.transition = "";
+      if (hasMoved) {
+        const rect = fab.getBoundingClientRect();
+        runtime.ui.settings.fabPos = { x: rect.left, y: rect.top };
+        saveUiState();
+      }
+    };
+
+    fab.addEventListener("mousedown", onDragStart);
+    window.addEventListener("mousemove", onDragMove, { passive: false });
+    window.addEventListener("mouseup", onDragEnd);
+
+    fab.addEventListener("touchstart", onDragStart, { passive: true });
+    window.addEventListener("touchmove", onDragMove, { passive: false });
+    window.addEventListener("touchend", onDragEnd);
+
+    fab.addEventListener("click", (e) => {
+      if (hasMoved) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      toggleUi(true);
+    });
+
     document.body.appendChild(fab);
 
     const backdrop = document.createElement("div");
@@ -2061,6 +2193,12 @@
     if (customCatListEl) {
       customCatListEl.addEventListener("click", (e) => {
         const t = e?.target;
+        if (t && t.tagName === "INPUT" && t.getAttribute("data-action") === "toggle-custom-cat-net") {
+          const cat = t.getAttribute("data-cat") || "";
+          toggleCategoryNetProfit(cat);
+          render();
+          return;
+        }
         const btn = t && t.closest ? t.closest("[data-action='remove-custom-cat']") : null;
         if (!btn) return;
         const cat = btn.getAttribute("data-cat") || "";
@@ -2181,12 +2319,17 @@
 
     if (customCatListEl) {
       const list = getCustomCategories();
+      const hidden = runtime.ui.settings.hiddenInNetCategories || [];
       customCatListEl.innerHTML = list.length
         ? list
             .map(
               (c) =>
                 `<span style="display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border:1px solid var(--mwl-border); border-radius:999px; background: var(--mwl-panel2);">
                   <span>${escapeHtml(c)}</span>
+                  <label style="display:flex; align-items:center; gap:4px; font-size:11px; color:var(--mwl-muted); cursor:pointer;">
+                    <input type="checkbox" data-action="toggle-custom-cat-net" data-cat="${escapeHtml(c)}" ${!hidden.includes(c) ? "checked" : ""}>
+                    入净收益
+                  </label>
                   <button class="mwl-btn" data-action="remove-custom-cat" data-cat="${escapeHtml(
                     c
                   )}" style="height:20px; padding:0 8px; border-radius:999px;">删</button>
@@ -2302,6 +2445,7 @@
     const player = runtime.ui.filters.player;
     const category = runtime.ui.filters.category;
     const excludeUncategorizedInNet = runtime.ui.mode === "net" && !category;
+    const hiddenInNet = runtime.ui.settings.hiddenInNetCategories || [];
 
     return records.filter((r) => {
       if (!r || typeof r.ts !== "number") return false;
@@ -2311,7 +2455,7 @@
       if (category && r?.meta?.actionCategory !== category) return false;
       if (excludeUncategorizedInNet) {
         const c = clampString(r?.meta?.actionCategory, 32) || "未分类";
-        if (c === "未分类") return false;
+        if (c === "未分类" || hiddenInNet.includes(c)) return false;
       }
       return true;
     });
@@ -2433,9 +2577,17 @@
 
   function renderRecordsView(records, mode) {
     // 视图 1：每次记录（不合并）
-    if (!records.length) return `<div class="mwl-empty">暂无记录（需要先产生行动产出/掉落后才会出现）。</div>`;
+    const thresholdTs = nowTs() - 3 * 24 * 60 * 60 * 1000; // 3天前
+    const recentRecords = records.filter(r => r.ts >= thresholdTs);
 
-    const html = records
+    if (!recentRecords.length) {
+      if (records.length > 0) {
+        return `<div class="mwl-empty">3天内暂无记录（共有 ${formatNumber(records.length)} 条更早的记录被隐藏，不影响汇总统计）。</div>`;
+      }
+      return `<div class="mwl-empty">暂无记录（需要先产生行动产出/掉落后才会出现）。</div>`;
+    }
+
+    const html = recentRecords
       .slice(0, 500)
       .map((r) => {
         const time = formatTime(r.ts);
@@ -2476,7 +2628,10 @@
         )}</div>
                 <div class="mwl-s">物品数：${formatNumber(items.length)}</div>
               </div>
-              <div class="mwl-v">${escapeHtml(total)}</div>
+              <div class="mwl-right">
+                <div class="mwl-v">${escapeHtml(total)}</div>
+                <button class="mwl-del-btn" data-action="delete-record" data-id="${escapeHtml(r.id)}" title="删除此记录">删除</button>
+              </div>
             </div>
             <div class="mwl-record-bd">
               <div class="mwl-items">${
@@ -2492,9 +2647,9 @@
       .join("");
 
     const hint =
-      records.length > 500
-        ? `<div class="mwl-empty">只展示最近 500 条（共 ${formatNumber(records.length)} 条），请用时间段缩小范围。</div>`
-        : "";
+      recentRecords.length > 500
+        ? `<div class="mwl-empty">只展示最近3天内的前 500 条（共 ${formatNumber(recentRecords.length)} 条，总共有 ${formatNumber(records.length)} 条在数据库中）。</div>`
+        : (records.length > recentRecords.length ? `<div class="mwl-empty">显示了最近3天内的 ${formatNumber(recentRecords.length)} 条记录（共有 ${formatNumber(records.length - recentRecords.length)} 条更早的记录被隐藏，不影响汇总统计）。</div>` : "");
     return hint + html;
   }
 
@@ -2651,7 +2806,10 @@
   function bindRecordExpanders() {
     const nodes = document.querySelectorAll(`.mwl-record [data-action="toggle"]`);
     nodes.forEach((n) => {
-      n.addEventListener("click", () => {
+      n.addEventListener("click", (e) => {
+        if (e.target && (e.target.closest('[data-action="delete-record"]') || e.target.closest('[data-action="edit-category"]'))) {
+          return; // Ignore toggle if clicking on delete button or category editor
+        }
         const root = n.closest(".mwl-record");
         if (!root) return;
         const id = root.getAttribute("data-id") || "";
@@ -2660,6 +2818,26 @@
           if (isOpen) runtime.openRecordIds.add(id);
           else runtime.openRecordIds.delete(id);
         }
+      });
+    });
+
+    const delNodes = document.querySelectorAll(`.mwl-record [data-action="delete-record"]`);
+    delNodes.forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        const id = btn.getAttribute("data-id") || "";
+        if (!id) return;
+        if (!confirm("确定要删除这条记录吗？")) return;
+        
+        deleteRecordFromDb(id).then(() => {
+          runtime.recordsCache = runtime.recordsCache.filter(x => x?.id !== id);
+          runtime.openRecordIds.delete(id);
+          updateFloatingBadge();
+          render();
+        }).catch(() => {
+          alert("删除失败，请重试。");
+        });
       });
     });
   }
@@ -2676,18 +2854,57 @@
         const id = n.getAttribute("data-id") || "";
         const rec = runtime.recordsCache.find((x) => x?.id === id) || null;
         const cur = clampString(rec?.meta?.actionCategory, 32) || "未分类";
+        
+        // Show a quick custom prompt dialog instead of native prompt to allow selection
         const hint = runtime.ui.mode === "net" ? "（净收益默认不统计“未分类”，可在此修改后纳入）" : "";
-        const input = prompt(`修改分类${hint}\n留空=未分类`, cur);
-        if (input == null) return;
-        const next = normalizeCategoryName(input) || "未分类";
-        if (next === cur) return;
-        if (next !== "未分类") addCustomCategory(next);
-        updateRecordCategory(id, next)
-          .then(() => {
-            hydrateControlsFromState();
-            render();
-          })
-          .catch(() => {});
+        const cats = getCustomCategories();
+        
+        const dialogHtml = `
+          <div id="${APP.id}-cat-dialog" style="position:fixed; inset:0; z-index:999999; display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,0.5);">
+            <div style="background:var(--mwl-panel); border:1px solid var(--mwl-border); padding:20px; border-radius:14px; width:300px; max-width:90vw; box-shadow:var(--mwl-shadow);">
+              <div style="font-weight:bold; margin-bottom:8px;">修改分类</div>
+              <div style="font-size:11px; color:var(--mwl-muted); margin-bottom:12px;">${hint}</div>
+              <input type="text" id="${APP.id}-cat-input" value="${escapeHtml(cur)}" class="mwl-input" style="width:100%; box-sizing:border-box; margin-bottom:12px;" placeholder="留空=未分类">
+              <div style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:16px; max-height:150px; overflow:auto;">
+                ${cats.map(c => `<button class="mwl-btn" style="padding:4px 8px; font-size:11px;" onclick="document.getElementById('${APP.id}-cat-input').value = '${escapeHtml(c)}'">${escapeHtml(c)}</button>`).join('')}
+              </div>
+              <div style="display:flex; justify-content:flex-end; gap:8px;">
+                <button class="mwl-btn" id="${APP.id}-cat-cancel">取消</button>
+                <button class="mwl-btn mwl-primary" id="${APP.id}-cat-ok">确定</button>
+              </div>
+            </div>
+          </div>
+        `;
+        
+        document.body.insertAdjacentHTML('beforeend', dialogHtml);
+        const dialog = document.getElementById(`${APP.id}-cat-dialog`);
+        const input = document.getElementById(`${APP.id}-cat-input`);
+        
+        input.focus();
+        input.select();
+        
+        const cleanup = () => dialog.remove();
+        
+        const apply = () => {
+          const val = input.value;
+          cleanup();
+          const next = normalizeCategoryName(val) || "未分类";
+          if (next === cur) return;
+          if (next !== "未分类") addCustomCategory(next);
+          updateRecordCategory(id, next)
+            .then(() => {
+              hydrateControlsFromState();
+              render();
+            })
+            .catch(() => {});
+        };
+        
+        document.getElementById(`${APP.id}-cat-cancel`).addEventListener("click", cleanup);
+        document.getElementById(`${APP.id}-cat-ok`).addEventListener("click", apply);
+        input.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") apply();
+          if (e.key === "Escape") cleanup();
+        });
       });
     });
   }
