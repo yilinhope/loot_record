@@ -2577,9 +2577,17 @@
 
   function renderRecordsView(records, mode) {
     // 视图 1：每次记录（不合并）
-    if (!records.length) return `<div class="mwl-empty">暂无记录（需要先产生行动产出/掉落后才会出现）。</div>`;
+    const thresholdTs = nowTs() - 3 * 24 * 60 * 60 * 1000; // 3天前
+    const recentRecords = records.filter(r => r.ts >= thresholdTs);
 
-    const html = records
+    if (!recentRecords.length) {
+      if (records.length > 0) {
+        return `<div class="mwl-empty">3天内暂无记录（共有 ${formatNumber(records.length)} 条更早的记录被隐藏，不影响汇总统计）。</div>`;
+      }
+      return `<div class="mwl-empty">暂无记录（需要先产生行动产出/掉落后才会出现）。</div>`;
+    }
+
+    const html = recentRecords
       .slice(0, 500)
       .map((r) => {
         const time = formatTime(r.ts);
@@ -2639,9 +2647,9 @@
       .join("");
 
     const hint =
-      records.length > 500
-        ? `<div class="mwl-empty">只展示最近 500 条（共 ${formatNumber(records.length)} 条），请用时间段缩小范围。</div>`
-        : "";
+      recentRecords.length > 500
+        ? `<div class="mwl-empty">只展示最近3天内的前 500 条（共 ${formatNumber(recentRecords.length)} 条，总共有 ${formatNumber(records.length)} 条在数据库中）。</div>`
+        : (records.length > recentRecords.length ? `<div class="mwl-empty">显示了最近3天内的 ${formatNumber(recentRecords.length)} 条记录（共有 ${formatNumber(records.length - recentRecords.length)} 条更早的记录被隐藏，不影响汇总统计）。</div>` : "");
     return hint + html;
   }
 
