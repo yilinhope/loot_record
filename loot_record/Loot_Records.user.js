@@ -151,16 +151,23 @@
     } catch {}
   }
 
+  function getUniqueKeyForCharacterItem(it) {
+    if (it.id != null) return String(it.id);
+    const loc = it.itemLocationHrid || "unknown";
+    const hrid = it.itemHrid || "";
+    const lv = Number(it.enhancementLevel ?? 0) || 0;
+    return `${hrid}#${lv}#${loc}`;
+  }
+
   function normalizeCharacterItemsToMap(characterItems) {
     const list = Array.isArray(characterItems) ? characterItems : [];
     const map = new Map();
     for (const it of list) {
       const hrid = it?.itemHrid;
-      const lv = Number(it?.enhancementLevel ?? 0) || 0;
       const count = Math.max(0, Number(it?.count) || 0);
       if (typeof hrid !== "string" || !hrid) continue;
-      const key = `${hrid}#${lv}`;
-      const existing = map.get(key) || { itemHrid: hrid, enhancementLevel: lv, count: 0 };
+      const key = getUniqueKeyForCharacterItem(it);
+      const existing = map.get(key) || { ...it, count: 0 };
       existing.count += count;
       map.set(key, existing);
     }
@@ -171,18 +178,39 @@
     const a = normalizeCharacterItemsToMap(prevItems);
     const b = normalizeCharacterItemsToMap(nextItems);
     const keys = new Set([...a.keys(), ...b.keys()]);
-    const gains = [];
-    const consumes = [];
+    
+    const deltaByKey = new Map();
+
     for (const k of keys) {
       const pa = a.get(k);
       const pb = b.get(k);
       const prev = pa ? pa.count : 0;
       const next = pb ? pb.count : 0;
       const delta = next - prev;
-      if (delta > 0) gains.push({ itemHrid: (pb || pa).itemHrid, enhancementLevel: (pb || pa).enhancementLevel, count: delta });
-      else if (delta < 0)
-        consumes.push({ itemHrid: (pb || pa).itemHrid, enhancementLevel: (pb || pa).enhancementLevel, count: Math.abs(delta) });
+      
+      if (delta !== 0) {
+        const item = pb || pa;
+        const hrid = item.itemHrid;
+        const level = Number(item.enhancementLevel ?? 0) || 0;
+        const groupKey = `${hrid}#${level}`;
+        
+        deltaByKey.set(groupKey, {
+          itemHrid: hrid,
+          enhancementLevel: level,
+          delta: (deltaByKey.get(groupKey)?.delta || 0) + delta,
+        });
+      }
     }
+    
+    const gains = [];
+    const consumes = [];
+    for (const v of deltaByKey.values()) {
+      const delta = Number(v.delta) || 0;
+      if (delta > 0) gains.push({ itemHrid: v.itemHrid, enhancementLevel: v.enhancementLevel, count: delta });
+      else if (delta < 0)
+        consumes.push({ itemHrid: v.itemHrid, enhancementLevel: v.enhancementLevel, count: Math.abs(delta) });
+    }
+
     return { gains, consumes };
   }
 
@@ -191,11 +219,10 @@
     const map = new Map();
     for (const it of list) {
       const hrid = it?.itemHrid;
-      const lv = Number(it?.enhancementLevel ?? 0) || 0;
       const count = Math.max(0, Number(it?.count) || 0);
       if (typeof hrid !== "string" || !hrid) continue;
-      const key = `${hrid}#${lv}`;
-      const existing = map.get(key) || { itemHrid: hrid, enhancementLevel: lv, count: 0 };
+      const key = getUniqueKeyForCharacterItem(it);
+      const existing = map.get(key) || { ...it, count: 0 };
       existing.count += count;
       map.set(key, existing);
     }
