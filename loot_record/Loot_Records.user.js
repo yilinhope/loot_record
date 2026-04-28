@@ -164,10 +164,13 @@
     const map = new Map();
     for (const it of list) {
       const hrid = it?.itemHrid;
+      const lv = Number(it?.enhancementLevel ?? 0) || 0;
       const count = Math.max(0, Number(it?.count) || 0);
       if (typeof hrid !== "string" || !hrid) continue;
-      const key = getUniqueKeyForCharacterItem(it);
-      const existing = map.get(key) || { ...it, count: 0 };
+      // We explicitly group by itemHrid and level, ignoring location and ID
+      // so that moving an item (e.g. equipping) doesn't count as a gain/consume
+      const key = `${hrid}#${lv}`;
+      const existing = map.get(key) || { itemHrid: hrid, enhancementLevel: lv, count: 0 };
       existing.count += count;
       map.set(key, existing);
     }
@@ -179,8 +182,9 @@
     const b = normalizeCharacterItemsToMap(nextItems);
     const keys = new Set([...a.keys(), ...b.keys()]);
     
-    const deltaByKey = new Map();
-
+    const gains = [];
+    const consumes = [];
+    
     for (const k of keys) {
       const pa = a.get(k);
       const pb = b.get(k);
@@ -188,27 +192,13 @@
       const next = pb ? pb.count : 0;
       const delta = next - prev;
       
-      if (delta !== 0) {
+      if (delta > 0) {
         const item = pb || pa;
-        const hrid = item.itemHrid;
-        const level = Number(item.enhancementLevel ?? 0) || 0;
-        const groupKey = `${hrid}#${level}`;
-        
-        deltaByKey.set(groupKey, {
-          itemHrid: hrid,
-          enhancementLevel: level,
-          delta: (deltaByKey.get(groupKey)?.delta || 0) + delta,
-        });
+        gains.push({ itemHrid: item.itemHrid, enhancementLevel: item.enhancementLevel, count: delta });
+      } else if (delta < 0) {
+        const item = pb || pa;
+        consumes.push({ itemHrid: item.itemHrid, enhancementLevel: item.enhancementLevel, count: Math.abs(delta) });
       }
-    }
-    
-    const gains = [];
-    const consumes = [];
-    for (const v of deltaByKey.values()) {
-      const delta = Number(v.delta) || 0;
-      if (delta > 0) gains.push({ itemHrid: v.itemHrid, enhancementLevel: v.enhancementLevel, count: delta });
-      else if (delta < 0)
-        consumes.push({ itemHrid: v.itemHrid, enhancementLevel: v.enhancementLevel, count: Math.abs(delta) });
     }
 
     return { gains, consumes };
@@ -216,17 +206,18 @@
 
   function snapshotFromCharacterItems(characterItems) {
     const list = Array.isArray(characterItems) ? characterItems : [];
-    const map = new Map();
+    // Only store minimal info we need for diffs, to save space
+    const items = [];
     for (const it of list) {
       const hrid = it?.itemHrid;
+      const lv = Number(it?.enhancementLevel ?? 0) || 0;
       const count = Math.max(0, Number(it?.count) || 0);
       if (typeof hrid !== "string" || !hrid) continue;
-      const key = getUniqueKeyForCharacterItem(it);
-      const existing = map.get(key) || { ...it, count: 0 };
-      existing.count += count;
-      map.set(key, existing);
+      // Note: we can just push raw items here since normalizeCharacterItemsToMap
+      // will handle grouping them when diffing.
+      items.push({ itemHrid: hrid, enhancementLevel: lv, count });
     }
-    return Array.from(map.values());
+    return items;
   }
 
   function getSnapshotForPlayer(playerName) {
