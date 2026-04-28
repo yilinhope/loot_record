@@ -2471,9 +2471,15 @@
       if (toTs && r.ts > toTs) return false;
       if (player && r.playerName !== player) return false;
       if (category && r?.meta?.actionCategory !== category) return false;
-      if (excludeUncategorizedInNet) {
-        const c = clampString(r?.meta?.actionCategory, 32) || "未分类";
-        if (c === "未分类" || hiddenInNet.includes(c)) return false;
+      
+      const c = clampString(r?.meta?.actionCategory, 32) || "未分类";
+      // 市场交易产生的数据，本身就是用钱换物品或用物品换钱，不应统计在收益或消耗内，否则会导致“虚高”的进出账
+      if (c === "市场交易" && runtime.ui.tab === "items") return false;
+
+      if (runtime.ui.mode === "net") {
+        if (c === "市场交易") return false;
+        if (excludeUncategorizedInNet && c === "未分类") return false;
+        if (hiddenInNet.includes(c)) return false;
       }
       return true;
     });
