@@ -1472,17 +1472,23 @@
     const fallbackActionHrid = actionHridFromPayload;
     const actionHrid = isFresh && !isMarketplace ? runtime.lastAction.actionHrid || fallbackActionHrid : fallbackActionHrid;
     
-    let actionCategory = isMarketplace ? "市场交易" : (isFresh
-      ? runtime.lastAction.actionCategory || classifyActionCategory(actionHrid) || "未分类"
-      : classifyActionCategory(actionHrid));
+    let actionCategory = "未分类";
+    
+    if (isMarketplace) {
+      actionCategory = "市场交易";
+    } else {
+      actionCategory = isFresh
+        ? runtime.lastAction.actionCategory || classifyActionCategory(actionHrid) || "未分类"
+        : classifyActionCategory(actionHrid);
 
-    if ((actionCategory === "未分类" || actionCategory === "其他") && !actionHrid) {
-      const hasTeaConsume = (Array.isArray(consumes) ? consumes : []).some((it) => isTeaItemHrid(it?.itemHrid));
-      const hasMazeSupplyConsume = (Array.isArray(consumes) ? consumes : []).some((it) => isMazeSupplyItemHrid(it?.itemHrid));
-      const hasFoodConsume = (Array.isArray(consumes) ? consumes : []).some((it) => isFoodItemHrid(it?.itemHrid));
-      if (hasTeaConsume) actionCategory = "茶消耗";
-      else if (hasMazeSupplyConsume) actionCategory = "迷宫用品";
-      else if (hasFoodConsume) actionCategory = "食物消耗";
+      if ((actionCategory === "未分类" || actionCategory === "其他") && !actionHrid) {
+        const hasTeaConsume = (Array.isArray(consumes) ? consumes : []).some((it) => isTeaItemHrid(it?.itemHrid));
+        const hasMazeSupplyConsume = (Array.isArray(consumes) ? consumes : []).some((it) => isMazeSupplyItemHrid(it?.itemHrid));
+        const hasFoodConsume = (Array.isArray(consumes) ? consumes : []).some((it) => isFoodItemHrid(it?.itemHrid));
+        if (hasTeaConsume) actionCategory = "茶消耗";
+        else if (hasMazeSupplyConsume) actionCategory = "迷宫用品";
+        else if (hasFoodConsume) actionCategory = "食物消耗";
+      }
     }
 
     const key = buildGainsDedupeKey({ gains, consumes, actionCategory, actionHrid });
