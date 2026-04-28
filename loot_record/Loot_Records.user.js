@@ -1371,8 +1371,20 @@
     if (typeof itemHrid !== "string" || !itemHrid) return false;
     const s = itemHrid.toLowerCase();
     if (!s.startsWith("/items/")) return false;
+    
+    // Explicitly exclude marketplace items that might falsely match
+    if (s.includes("market") || s.includes("trade") || s.includes("listing")) return false;
+
     if (/(?:^|\/|_)tea(?:$|_|\/)/i.test(s)) return true;
     if (/_tea(?:$|_)/i.test(s)) return true;
+    
+    // Check common tea names in display name as fallback
+    const name = getItemDisplayName(itemHrid);
+    if (typeof name === "string" && name) {
+      if (/(茶|🍵)/.test(name) && !name.includes("箱")) return true;
+      if (/tea/i.test(name)) return true;
+    }
+    
     return false;
   }
 
